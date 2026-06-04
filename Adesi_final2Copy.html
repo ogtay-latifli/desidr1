@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>DESI DR1 — Universe Explorer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; background: #000; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+
+        #legend {
+            position: absolute; bottom: 20px; left: 20px;
+            color: white; font-size: 13px; line-height: 2; z-index: 5;
+        }
+        .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+
+        #info-panel {
+            position: absolute; top: 20px; left: 50%;
+            transform: translateX(-50%);
+            color: white; text-align: center;
+            pointer-events: none; z-index: 5;
+        }
+        #info-panel h2 { font-size: 20px; font-weight: 300; letter-spacing: 2px; opacity: 0.9; }
+        #step-label { font-size: 14px; opacity: 0.6; margin-top: 6px; letter-spacing: 1px; }
+
+        #status { position: absolute; top: 20px; right: 20px; color: rgba(255,255,255,0.5); font-size: 12px; z-index: 5; }
+
+        #controls-panel {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 12px; align-items: center; z-index: 5;
+        }
+        button {
+            background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.3);
+            color: white; padding: 10px 28px; border-radius: 24px; font-size: 14px;
+            cursor: pointer; letter-spacing: 1px; transition: all 0.2s;
+        }
+        button:hover { background: rgba(255,255,255,0.2); }
+        button:disabled { opacity: 0.3; cursor: default; }
+
+        #progress-bar { width: 200px; height: 3px; background: rgba(255,255,255,0.15); border-radius: 2px; overflow: hidden; }
+        #progress-fill { height: 100%; width: 0%; background: rgba(255,255,255,0.7); transition: width 0.1s; }
+    </style>
+</head>
+<body>
+
+    <div id="info-panel">
+        <h2>DESI DR1 — Universe Explorer</h2>
+        <div id="step-label">Loading data...</div>
+    </div>
+    <div id="status">Loading...</div>
+    <div id="legend">
+        <div><span class="dot" style="background:yellow"></span>BGS — Bright Galaxy Survey</div>
+        <div><span class="dot" style="background:#ff6000"></span>LRG — Luminous Red Galaxies</div>
+        <div><span class="dot" style="background:#1e90ff"></span>ELG — Emission Line Galaxies</div>
+        <div><span class="dot" style="background:#00ff44"></span>QSO — Quasars</div>
+        <div><span class="dot" style="background:rgba(255,255,255,0.4)"></span>Cosmic Web</div>
+    </div>
+
+    <div id="controls-panel">
+        <button id="btn-play"  onclick="startAnimation()" disabled>▶ Play</button>
+        <button id="btn-stop"  onclick="stopAnimation()"  disabled>■ Stop</button>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <button id="btn-reset" onclick="resetView()">↺ Reset</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        const W = window.innerWidth;
+        const H = window.innerHeight;
+        const scene  = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, W/H, 0.001, 1000);
+
+        const renderer = new THREE.WebGLRenderer({
+            antialias: false,
+            powerPreference: 'high-performance'
+        });
+        renderer.setSize(W, H);
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.domElement.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:1';
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.enabled = true;
+
+        camera.position.set(0, 0, 22);
+        controls.target.set(0, 0, 0);
+        camera.lookAt(0, 0, 0);
+        controls.update();
+
+        // ── Göy sferası ─────────────────────────────────────────
+        const R = 8.5;
+        scene.add(new THREE.Mesh(
+            new THREE.SphereGeometry(R, 48, 24),
+            new THREE.MeshBasicMaterial({
+                color: 0x1133aa, wireframe: true,
+                transparent: true, opacity: 0.06
+            })
+        ));
+
+        function raDecToXYZ(ra_deg, dec_deg, r) {
+            const ra  = ra_deg  * Math.PI / 180;
+            const dec = dec_deg * Math.PI / 180;
+            return new THREE.Vector3(
+                r * Math.cos(dec) * Math.cos(ra),
+                r * Math.sin(dec),
+                -r * Math.cos(dec) * Math.sin(ra)
+            );
+        }
+
+        // ── Bürclər ─────────────────────────────────────────────
+        const constellations = [
+            { name: 'Orion', lines: [
+                [[88.79,7.41],[81.28,6.35]], [[81.28,6.35],[78.63,-8.20]],
+                [[78.63,-8.20],[84.69,-9.67]], [[84.69,-9.67],[88.79,7.41]],
+                [[85.19,-1.94],[84.05,-1.20]], [[84.05,-1.20],[83.00,-0.30]],
+                [[85.19,-1.94],[84.69,-9.67]], [[83.00,-0.30],[78.63,-8.20]],
+                [[81.28,6.35],[83.00,9.93]], [[88.79,7.41],[83.00,9.93]],
+            ]},
+            { name: 'Ursa Major', lines: [
+                [[165.93,61.75],[165.46,56.38],[178.46,53.69],[183.86,57.03],
+                 [193.51,55.96],[200.98,54.92],[206.89,49.31]],
+            ]},
+            { name: 'Cassiopeia', lines: [
+                [[2.29,59.15],[10.13,56.54],[14.18,60.72],[21.45,60.24],[28.60,63.67]],
+            ]},
+            { name: 'Cygnus', lines: [
+                [[310.36,45.28],[305.56,40.26],[292.68,27.96]],
+                [[305.56,40.26],[296.24,45.13]],
+                [[305.56,40.26],[311.55,33.97]],
+            ]},
+            { name: 'Leo', lines: [
+                [[152.09,11.97],[154.17,16.76],[154.99,19.84],
+                 [177.26,14.57],[170.21,15.43],[168.53,20.52]],
+            ]},
+            { name: 'Scorpius', lines: [
+                [[247.35,-26.43],[252.54,-25.59],[253.08,-28.02],
+                 [255.98,-29.21],[258.04,-43.24],[263.40,-37.10],[265.62,-39.03]],
+            ]},
+            { name: 'Lyra',      lines: [ [[279.23,38.78],[284.73,39.61],[282.52,36.90],[281.19,32.69]] ]},
+            { name: 'Hercules',  lines: [ [[255.96,31.60],[258.75,36.81],[247.55,38.92],[251.76,45.96],[255.96,31.60],[260.92,29.25]] ]},
+            { name: 'Boötes',    lines: [ [[213.91,19.18],[218.02,40.39],[211.59,37.36],[206.89,38.31],[210.41,27.07],[213.91,19.18]] ]},
+            { name: 'Virgo',     lines: [ [[190.41,-11.16],[184.98,-0.67],[177.67,1.76],[173.15,10.96]] ]},
+            { name: 'Gemini',    lines: [ [[116.33,28.03],[113.65,31.89]], [[116.33,28.03],[99.43,16.40],[95.74,22.51]] ]},
+            { name: 'Perseus',   lines: [ [[51.08,49.86],[46.00,40.96],[56.87,40.01],[58.53,35.79],[62.16,32.29]] ]},
+            { name: 'Aquila',    lines: [ [[297.70,8.87],[286.35,13.86],[295.02,5.53],[297.70,8.87],[301.18,3.11]] ]},
+            { name: 'Pegasus',   lines: [ [[346.19,15.21],[1.10,28.08],[2.53,33.17],[328.48,33.17],[326.05,28.66],[346.19,15.21]] ]},
+            { name: 'Andromeda', lines: [ [[2.53,33.17],[9.83,38.50],[17.43,35.62],[30.97,42.33]] ]},
+        ];
+
+        const lineMat = new THREE.LineBasicMaterial({ color: 0xaaaaff, transparent: true, opacity: 0.55 });
+        constellations.forEach(con => {
+            con.lines.forEach(seg => {
+                scene.add(new THREE.Line(
+                    new THREE.BufferGeometry().setFromPoints(seg.map(([ra,dec]) => raDecToXYZ(ra,dec,R))),
+                    lineMat.clone()
+                ));
+            });
+            const [ra0, dec0] = con.lines[0][0];
+            const pos = raDecToXYZ(ra0, dec0, R * 1.1);
+            const c2 = document.createElement('canvas');
+            c2.width = 300; c2.height = 72;
+            const ctx = c2.getContext('2d');
+            ctx.fillStyle = 'rgba(180,180,255,0.95)';
+            ctx.font = 'bold 30px sans-serif';
+            ctx.fillText(con.name, 6, 48);
+            const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+                map: new THREE.CanvasTexture(c2), transparent: true, opacity: 0.85
+            }));
+            spr.position.copy(pos);
+            spr.scale.set(1.6, 0.4, 1);
+            scene.add(spr);
+        });
+
+        // ── Gaussian texture ─────────────────────────────────────
+        function makeGaussianTexture(size = 64) {
+            const canvas = document.createElement('canvas');
+            canvas.width = canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            const center = size / 2;
+            const gradient = ctx.createRadialGradient(
+                center, center, 0,
+                center, center, center
+            );
+            gradient.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+            gradient.addColorStop(0.3, 'rgba(255,255,255,0.8)');
+            gradient.addColorStop(0.6, 'rgba(255,255,255,0.3)');
+            gradient.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, size, size);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const gaussianTex = makeGaussianTexture(64);
+
+        // ── Shell sistemi ────────────────────────────────────────
+        const SHELLS = [
+            { zMax: 0.15 }, { zMax: 0.40 }, { zMax: 0.80 },
+            { zMax: 1.30 }, { zMax: 2.50 }, { zMax: 5.00 },
+        ];
+
+        let shellObjects = [];
+        let filamentMesh = null;   // ← qalaktik tor
+        let dataLoaded   = false;
+        let filamentLoaded = false;
+
+        // ── Flight yolu ──────────────────────────────────────────
+        const flightPath = new THREE.CatmullRomCurve3([
+            new THREE.Vector3( 10.0,  4.0,   8.0),
+            new THREE.Vector3(  6.0,  2.0,   5.0),
+            new THREE.Vector3(  3.0,  1.0,   2.5),
+            new THREE.Vector3(  1.5,  0.5,   1.0),
+            new THREE.Vector3(  0.3,  0.1,   0.2),
+            new THREE.Vector3(  0.02, 0.01,  0.01),
+            new THREE.Vector3( -0.3,  0.15, -0.2),
+            new THREE.Vector3( -1.5,  0.8,  -1.0),
+            new THREE.Vector3( -2.5,  1.5,   0.5),
+            new THREE.Vector3( -1.0,  2.5,  -2.0),
+            new THREE.Vector3(  2.0, -1.0,  -2.5),
+            new THREE.Vector3(  3.5,  1.5,  -1.5),
+            new THREE.Vector3(  1.5,  3.0,   2.0),
+            new THREE.Vector3(  8.0,  3.5,   5.0),
+        ]);
+
+        const SHELL_PHASE_END = 0.35;
+        const PULLBACK_END    = 0.50;
+
+        const shellAppearAt = SHELLS.map((_, i) =>
+            (i / (SHELLS.length + 2)) * SHELL_PHASE_END
+        );
+
+        const stepLabels = [
+            { t: 0.00, text: "The Universe begins to reveal itself..." },
+            { t: 0.06, text: "z < 0.15 — Nearby bright galaxies" },
+            { t: 0.12, text: "z < 0.40 — Luminous Red Galaxies emerge" },
+            { t: 0.18, text: "z < 0.80 — The cosmic web takes shape" },
+            { t: 0.24, text: "z < 1.30 — Emission Line Galaxies" },
+            { t: 0.30, text: "z < 2.50 — Reaching deeper into the universe" },
+            { t: 0.35, text: "z < 5.00 — Quasars at the edge of time" },
+            { t: 0.42, text: "Pulling back — the full survey revealed" },
+            { t: 0.50, text: "Now diving in..." },
+            { t: 0.58, text: "Approaching Earth — the centre of it all" },
+            { t: 0.65, text: "Flying through the cosmic web" },
+            { t: 0.75, text: "Filaments — the skeleton of the universe" },
+            { t: 0.87, text: "Quasars — 12 billion light years away" },
+            { t: 1.00, text: "DESI DR1 — Mapping the Universe" },
+        ];
+
+        // ── Galaxy data yüklənməsi ───────────────────────────────
+        fetch('desi_points2.bin')
+            .then(r => r.arrayBuffer())
+            .then(buf => {
+                const RECORD = 17;
+                const n = buf.byteLength / RECORD;
+                const view = new DataView(buf);
+
+                const shellPos = SHELLS.map(() => []);
+                const shellCol = SHELLS.map(() => []);
+
+                for (let i = 0; i < n; i++) {
+                    const o  = i * RECORD;
+                    const px =  view.getFloat32(o,      true);
+                    const py =  view.getFloat32(o +  8, true);
+                    const pz = -view.getFloat32(o +  4, true);
+                    const cr =  view.getUint8(o + 12) / 255;
+                    const cg =  view.getUint8(o + 13) / 255;
+                    const cb =  view.getUint8(o + 14) / 255;
+                    const zv =  view.getUint16(o + 15, true) / 10000;
+
+                    for (let s = 0; s < SHELLS.length; s++) {
+                        const zMin = s === 0 ? 0 : SHELLS[s-1].zMax;
+                        if (zv >= zMin && zv < SHELLS[s].zMax) {
+                            shellPos[s].push(px, py, pz);
+                            shellCol[s].push(cr, cg, cb);
+                            break;
+                        }
+                    }
+                }
+
+                shellObjects = SHELLS.map((_, s) => {
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(shellPos[s]), 3));
+                    geo.setAttribute('color',    new THREE.BufferAttribute(new Float32Array(shellCol[s]), 3));
+                    const mat = new THREE.PointsMaterial({
+                        size:            1.5,
+                        sizeAttenuation: false,
+                        vertexColors:    true,
+                        transparent:     true,
+                        opacity:         0.0,
+                        map:             gaussianTex,
+                        depthWrite:      true,
+                        blending:        THREE.NormalBlending,
+                        alphaTest:       0.1,
+                    });
+                    const pts = new THREE.Points(geo, mat);
+                    scene.add(pts);
+                    return pts;
+                });
+
+                dataLoaded = true;
+                updateStatus();
+                document.getElementById('btn-play').disabled = false;
+                document.getElementById('step-label').textContent = 'Press Play to begin the journey';
+            })
+            .catch(() => {
+                document.getElementById('status').innerText = 'desi_points2.bin not found';
+            });
+	
+	// ── KDE density layer ─────────────────────────────────────────
+	fetch('kde_points.bin')
+    		.then(r => r.arrayBuffer())
+    		.then(buf => {
+       			const RECORD = 15;
+        			const n = buf.byteLength / RECORD;
+        			const view = new DataView(buf);
+
+        		const pos = new Float32Array(n * 3);
+        		const col = new Float32Array(n * 3);
+
+        		for (let i = 0; i < n; i++) {
+            			const o = i * RECORD;
+            			pos[i*3]   =  view.getFloat32(o,     true);
+            			pos[i*3+1] =  view.getFloat32(o + 8, true);
+            			pos[i*3+2] = -view.getFloat32(o + 4, true);
+            			col[i*3]   = view.getUint8(o+12) / 255;
+            			col[i*3+1] = view.getUint8(o+13) / 255;
+            			col[i*3+2] = view.getUint8(o+14) / 255;
+        		}
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+
+        const mat = new THREE.PointsMaterial({
+            size:            2.0,
+            sizeAttenuation: false,
+            vertexColors:    true,
+            transparent:     true,
+            opacity:         0.8,
+            map:             gaussianTex,
+            depthWrite:      false,
+            blending:        THREE.AdditiveBlending,
+            alphaTest:       0.01,
+        });
+
+        const kdePts = new THREE.Points(geo, mat);
+        scene.add(kdePts);
+        console.log('KDE layer yükləndi: ' + n.toLocaleString() + ' nöqtə');
+    })
+    .catch(() => console.log('kde_points.bin tapılmadı'));
+
+        // ── Filament data yüklənməsi ─────────────────────────────
+        fetch('filaments1.bin')
+            .then(r => r.arrayBuffer())
+            .then(buf => {
+                // Her nöqtə: 3 × float32 = 12 bayt
+                // 296,740 nöqtə = 148,370 xətt
+                const positions = new Float32Array(buf);
+
+                // Three.js-də Y və Z swap lazımdır (desi_points2.bin ilə eyni)
+                // filaments.bin-də: x=col0, y=col1, z=col2
+                // Amma desi_points2.bin-də Z swap var: py=offset+8, pz=-(offset+4)
+                // Eyni swap tətbiq et:
+                const swapped = new Float32Array(positions.length);
+                for (let i = 0; i < positions.length / 3; i++) {
+                    swapped[i*3]   =  positions[i*3];      // x → x
+                    swapped[i*3+1] =  positions[i*3+2];    // z → y (swap)
+                    swapped[i*3+2] = -positions[i*3+1];    // -y → z (swap)
+                }
+
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.BufferAttribute(swapped, 3));
+
+                const mat = new THREE.LineBasicMaterial({
+                    color:       0xffffff,
+                    transparent: true,
+                    opacity:     0.12,      // ← zəif — nöqtələri üstələməsin
+                    depthWrite:  false,
+                });
+
+                filamentMesh = new THREE.LineSegments(geo, mat);
+                scene.add(filamentMesh);
+
+                filamentLoaded = true;
+                updateStatus();
+            })
+            .catch(() => {
+                document.getElementById('status').innerText += ' | filaments.bin not found';
+            });
+
+        function updateStatus() {
+            const g = dataLoaded     ? '✓ galaxies' : '… galaxies';
+            const f = filamentLoaded ? '✓ filaments' : '… filaments';
+            document.getElementById('status').innerText = `${g}  ${f}`;
+        }
+
+        // ── Animasiya dəyişənləri ────────────────────────────────
+        let isAnimating   = false;
+        let animT         = 0;
+        const ANIM_DURATION = 70000;
+        let animStartTime = null;
+
+        const SPIRAL_END_ANGLE = SHELL_PHASE_END * Math.PI * 4;
+        const SPIRAL_END_DIST  = 0.5 + SHELL_PHASE_END * 13.5;
+        const pullbackStart = new THREE.Vector3(
+            SPIRAL_END_DIST * Math.cos(SPIRAL_END_ANGLE),
+            SPIRAL_END_DIST * 0.3,
+            SPIRAL_END_DIST * Math.sin(SPIRAL_END_ANGLE)
+        );
+        const pullbackEnd = new THREE.Vector3(0, 0, 28);
+
+        function startAnimation() {
+            if (isAnimating || !dataLoaded) return;
+            isAnimating   = true;
+            animT         = 0;
+            animStartTime = performance.now();
+            controls.enabled = false;
+            document.getElementById('btn-play').disabled = true;
+            document.getElementById('btn-stop').disabled = false;
+            shellObjects.forEach(s => s.material.opacity = 0.0);
+            if (filamentMesh) filamentMesh.material.opacity = 0.0;
+            camera.position.set(0.5, 0.15, 0.0);
+            controls.target.set(0, 0, 0);
+            camera.lookAt(0, 0, 0);
+        }
+
+        function stopAnimation() {
+            if (!isAnimating) return;
+            isAnimating = false;
+            controls.enabled = true;
+            document.getElementById('btn-play').disabled = false;
+            document.getElementById('btn-stop').disabled = true;
+            document.getElementById('step-label').textContent = 'Paused — press Play to restart';
+        }
+
+        function resetView() {
+            isAnimating  = false;
+            animT        = 0;
+            controls.enabled = true;
+            camera.position.set(12, 6, 12);
+            controls.target.set(0, 0, 0);
+            camera.lookAt(0, 0, 0);
+            document.getElementById('btn-play').disabled = !dataLoaded;
+            document.getElementById('btn-stop').disabled = true;
+            document.getElementById('step-label').textContent = 'Press Play to begin the journey';
+            document.getElementById('progress-fill').style.width = '0%';
+            shellObjects.forEach(s => s.material.opacity = 0.7);
+            if (filamentMesh) filamentMesh.material.opacity = 0.12;
+        }
+
+        // ── Render loop ──────────────────────────────────────────
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (isAnimating && animStartTime !== null) {
+                const elapsed = performance.now() - animStartTime;
+                animT = Math.min(elapsed / ANIM_DURATION, 1.0);
+
+                // PHASE 0: Shell-shell (0 → 0.35)
+                if (animT <= SHELL_PHASE_END) {
+                    shellObjects.forEach((pts, s) => {
+                        const appearT = shellAppearAt[s];
+                        if (animT >= appearT) {
+                            const fadeT = (animT - appearT) / (SHELL_PHASE_END / SHELLS.length);
+                            pts.material.opacity = Math.min(fadeT * 2.0, 0.9);
+                        }
+                    });
+                    // Filamentlər shell fazasının sonunda yavaş peyda olur
+                    if (filamentMesh) {
+                        const ft = Math.max(0, (animT - SHELL_PHASE_END * 0.7) / (SHELL_PHASE_END * 0.3));
+                        filamentMesh.material.opacity = Math.min(ft * 0.12, 0.12);
+                    }
+                    const angle = animT * Math.PI * 4;
+                    const dist  = 0.5 + animT * 13.5;
+                    camera.position.set(
+                        dist * Math.cos(angle),
+                        dist * 0.3,
+                        dist * Math.sin(angle)
+                    );
+                    camera.lookAt(0, 0, 0);
+
+                // PHASE 1: Pullback (0.35 → 0.50)
+                } else if (animT <= PULLBACK_END) {
+                    shellObjects.forEach(s => s.material.opacity = 0.9);
+                    if (filamentMesh) filamentMesh.material.opacity = 0.12;
+                    const pt   = (animT - SHELL_PHASE_END) / (PULLBACK_END - SHELL_PHASE_END);
+                    const ease = pt < 0.5 ? 2*pt*pt : -1+(4-2*pt)*pt;
+                    camera.position.lerpVectors(pullbackStart, pullbackEnd, ease);
+                    camera.lookAt(0, 0, 0);
+
+                // PHASE 2: Flight (0.50 → 1.0)
+                } else {
+                    shellObjects.forEach(s => s.material.opacity = 0.9);
+                    if (filamentMesh) filamentMesh.material.opacity = 0.12;
+                    const flightT = (animT - PULLBACK_END) / (1.0 - PULLBACK_END);
+                    const pos     = flightPath.getPoint(flightT);
+                    const lookAt  = flightPath.getPoint(Math.min(flightT + 0.015, 1.0));
+                    camera.position.copy(pos);
+                    camera.lookAt(lookAt);
+                }
+
+                document.getElementById('progress-fill').style.width = (animT * 100).toFixed(1) + '%';
+
+                for (let i = stepLabels.length - 1; i >= 0; i--) {
+                    if (animT >= stepLabels[i].t) {
+                        document.getElementById('step-label').textContent = stepLabels[i].text;
+                        break;
+                    }
+                }
+
+                if (animT >= 1.0) {
+                    isAnimating = false;
+                    controls.enabled = true;
+                    document.getElementById('btn-play').disabled = false;
+                    document.getElementById('btn-stop').disabled = true;
+                    document.getElementById('step-label').textContent = 'Journey complete — explore freely';
+                }
+
+            } else {
+                controls.update();
+            }
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
