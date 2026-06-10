@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>DESI DR1 Interactive Map</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body { background: #000; overflow: hidden; }
+        canvas { display: block; cursor: grab; }
+        canvas:active { cursor: grabbing; }
+
+        #info {
+            position: fixed; bottom: 16px; left: 16px;
+            color: rgba(255,255,255,0.45);
+            font: 11px monospace; pointer-events: none;
+        }
+        #legend {
+            position: fixed; bottom: 16px; right: 16px;
+            color: white; font: 13px 'Segoe UI', sans-serif;
+            pointer-events: none; line-height: 2;
+        }
+        .dot {
+            display: inline-block; width: 9px; height: 9px;
+            border-radius: 50%; margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info"></div>
+<div id="legend">
+    <div><span class="dot" style="background:#FFFF00"></span>BGS - Bright Galaxies</div>
+    <div><span class="dot" style="background:#FF6000"></span>LRG - Luminous Red</div>
+    <div><span class="dot" style="background:#1E90FF"></span>ELG - Emission Line</div>
+    <div><span class="dot" style="background:#00FF44"></span>QSO - Quasars</div>
+</div>
+
+<script>
+const CANVAS = document.getElementById('c');
+const CTX    = CANVAS.getContext('2d');
+const INFO   = document.getElementById('info');
+
+const WORLD        = 7.5;   // ±7.5 Gpc
+const TILE_PX      = 256;
+const MAX_NATIVE_Z = 7;
+
+// Başlanğıc görünüş
+let viewX = 0, viewY = 0;   // mərkəz (Gpc)
+let zoom  = 1.5;            // başlanğıc zoom
+
+// Scale: ekran pikseli / Gpc
+function getScale() {
+    return TILE_PX * Math.pow(2, zoom) / (WORLD * 2);
+}
+
+// Gpc → ekran koordinatı
+function gpcToScreen(gx, gy) {
+    const s = getScale();
+    return [
+        CANVAS.width  / 2 + (gx - viewX) * s,
+        CANVAS.height / 2 - (gy - viewY) * s   // y-flip
+    ];
+}
+
+// Tile cache
+const cache = {};
+const loading = new Set();
+
+function getTile(z, tx, ty) {
+    const key = `${z}/${tx}/${ty}`;
+    if (cache[key]) return cache[key];
+    if (loading.has(key)) return null;
+
+    loading.add(key);
+    const img = new Image();
+    img.onload  = () => { cache[key] = img; loading.delete(key); render(); };
+    img.onerror = () => { loading.delete(key); };
+    img.src = `tiles/${z}/${tx}/${ty}.png`;
+    return null;
+}
+
+function render() {
+    CTX.fillStyle = '#000000';
+    CTX.fillRect(0, 0, CANVAS.width, CANVAS.height);
+
+    const s         = getScale();
+    const tileZoom  = Math.min(Math.max(Math.round(zoom), 0), MAX_NATIVE_Z);
+    const n         = Math.pow(2, tileZoom);
+    const tileGpc   = (WORLD * 2) / n;
+    const tilePx    = tileGpc * s;   // tile ölçüsü ekranda (piksel)
+
+    // Görünən Gpc aralığı
+    const left   = viewX - CANVAS.width  / 2 / s;
+    const right  = viewX + CANVAS.width  / 2 / s;
+    const bottom = viewY - CANVAS.height / 2 / s;
+    const top    = viewY + CANVAS.height / 2 / s;
+
+    // Görünən tile indeksləri
+    const txMin = Math.max(0, Math.floor((left  + WORLD) / tileGpc));
+    const txMax = Math.min(n-1, Math.ceil((right + WORLD) / tileGpc));
+    const tyMin = Math.max(0, Math.floor((WORLD - top)    / tileGpc));
+    const tyMax = Math.min(n-1, Math.ceil((WORLD - bottom) / tileGpc));
+
+    for (let tx = txMin; tx <= txMax; tx++) {
+        for (let ty = tyMin; ty <= tyMax; ty++) {
+            const img = getTile(tileZoom, tx, ty);
+            if (!img) continue;
+
+            // Tile-in sol-yuxarı künc koordinatları (Gpc)
+            const tileLeft = -WORLD + tx * tileGpc;
+            const tileTop  =  WORLD - ty * tileGpc;
+
+            const [sx, sy] = gpcToScreen(tileLeft, tileTop);
+            CTX.drawImage(img, sx, sy, tilePx, tilePx);
+        }
+    }
+
+    INFO.textContent =
+        `zoom: ${zoom.toFixed(2)}  |  mərkəz: (${viewX.toFixed(3)}, ${viewY.toFixed(3)}) Gpc`;
+}
+
+// ── Resize ──────────────────────────────────────────────────
+function resize() {
+    CANVAS.width  = window.innerWidth;
+    CANVAS.height = window.innerHeight;
+    render();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Mouse pan ───────────────────────────────────────────────
+let dragging = false, mx = 0, my = 0;
+
+CANVAS.addEventListener('mousedown', e => {
+    dragging = true; mx = e.clientX; my = e.clientY;
+});
+CANVAS.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const s = getScale();
+    viewX -= (e.clientX - mx) / s;
+    viewY += (e.clientY - my) / s;
+    mx = e.clientX; my = e.clientY;
+    render();
+});
+document.addEventListener('mouseup', () => dragging = false);
+
+// ── Zoom (mouse wheel) ──────────────────────────────────────
+CANVAS.addEventListener('wheel', e => {
+    e.preventDefault();
+    const s0 = getScale();
+    const mgx = viewX + (e.clientX - CANVAS.width  / 2) / s0;
+    const mgy = viewY - (e.clientY - CANVAS.height / 2) / s0;
+
+    zoom += -e.deltaY * 0.002;
+    zoom  = Math.max(-0.5, Math.min(MAX_NATIVE_Z + 1.5, zoom));
+
+    const s1 = getScale();
+    viewX = mgx - (e.clientX - CANVAS.width  / 2) / s1;
+    viewY = mgy + (e.clientY - CANVAS.height / 2) / s1;
+    render();
+}, { passive: false });
+
+// ── Touch (mobil) ───────────────────────────────────────────
+let lastTouchDist = null, lastTX = 0, lastTY = 0;
+
+CANVAS.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+        lastTX = e.touches[0].clientX;
+        lastTY = e.touches[0].clientY;
+    } else if (e.touches.length === 2) {
+        lastTouchDist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+        );
+    }
+}, { passive: true });
+
+CANVAS.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+        const s = getScale();
+        viewX -= (e.touches[0].clientX - lastTX) / s;
+        viewY += (e.touches[0].clientY - lastTY) / s;
+        lastTX = e.touches[0].clientX;
+        lastTY = e.touches[0].clientY;
+        render();
+    } else if (e.touches.length === 2 && lastTouchDist) {
+        const d = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+        );
+        zoom += Math.log2(d / lastTouchDist);
+        zoom  = Math.max(-0.5, Math.min(MAX_NATIVE_Z + 1.5, zoom));
+        lastTouchDist = d;
+        render();
+    }
+}, { passive: false });
+
+CANVAS.addEventListener('touchend', () => { lastTouchDist = null; });
+</script>
+</body>
+</html>
